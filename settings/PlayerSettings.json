@@ -1,0 +1,20 @@
+{
+  "resolution": {
+    "designWidth": 1080,
+    "designHeight": 2160,
+    "scaleMode": "fixedwidth"
+  },
+  "3D": {
+    "lightClusterCount": {}
+  },
+  "physics2D": {
+    "gravity": {}
+  },
+  "modules": {
+    "laya.ui": true,
+    "laya.d3": true
+  },
+  "splash": {
+    "fit": "center"
+  }
+}

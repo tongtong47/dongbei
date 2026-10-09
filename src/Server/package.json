@@ -1,0 +1,16 @@
+{
+  "name": "dongbei-game-server",
+  "version": "1.0.0",
+  "description": "东北话小游戏后端：微信登录、用户信息、分数与排行榜",
+  "private": true,
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsc -p tsconfig.json && node dist/server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.9.0"
+  }
+}
