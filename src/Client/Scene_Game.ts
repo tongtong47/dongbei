@@ -82,6 +82,14 @@ export class Scene_Game extends Laya.Script {
     /** 分数数字 */
     @property({ type: Laya.Label })
     public My_score_Number: Laya.Label = null;
+    private levelNumber: Laya.Label = null;
+    private progressNumber: Laya.Label = null;
+    private backHomeButton: Laya.Button = null;
+    private dailyMode: boolean = false;
+    private stateOverlay: Laya.Box = null;
+    private overlayMode: string = "";
+    private overlayActionButton: Laya.Button = null;
+    private overlayReplayButton: Laya.Button = null;
 
     /** 题库文件（相对 assets 目录） */
     @property({ type: "string", tips: "题库 JSON 路径，可不断扩充题目" })
@@ -206,7 +214,10 @@ export class Scene_Game extends Laya.Script {
     // ------------------------------------------------------------------
 
     onStart(): void {
+        this.dailyMode = Scene_Title.pendingMode === "daily";
+        this.applyPlayerSettings();
         this.bindNodes();
+        this.applyFontSize();
         this.initList(this.List_1, this.onRenderAnswer, this.onAnswerMouse);
         this.initList(this.List_2, this.onRenderPool, this.onPoolMouse);
         this.bindButtons();
@@ -220,6 +231,9 @@ export class Scene_Game extends Laya.Script {
         if (this.downButton) this.downButton.off(Laya.Event.CLICK, this, this.onDownClick);
         if (this.RankButton) this.RankButton.off(Laya.Event.CLICK, this, this.onRankClick);
         if (this.AudioButton) this.AudioButton.off(Laya.Event.CLICK, this, this.onAudioClick);
+        if (this.backHomeButton) this.backHomeButton.off(Laya.Event.CLICK, this, this.onBackHome);
+        if (this.overlayActionButton) this.overlayActionButton.off(Laya.Event.CLICK, this, this.onOverlayAction);
+        if (this.overlayReplayButton) this.overlayReplayButton.off(Laya.Event.CLICK, this, this.onOverlayReplay);
         this.stopAudio();
     }
 
@@ -235,6 +249,12 @@ export class Scene_Game extends Laya.Script {
         if (!this.RankButton) this.RankButton = this.findNode(owner, "RankButton") as Laya.Button;
         if (!this.My_score_Number) this.My_score_Number = this.findNode(owner, "My_score_Number") as Laya.Label;
         if (!this.AudioButton) this.AudioButton = this.findNode(owner, "AudioButton") as Laya.Button;
+        this.levelNumber = this.findNode(owner, "LevelNumber") as Laya.Label;
+        this.progressNumber = this.findNode(owner, "ProgressNumber") as Laya.Label;
+        this.backHomeButton = this.findNode(owner, "BackHomeButton") as Laya.Button;
+        this.stateOverlay = this.findNode(owner, "GameStateOverlay") as Laya.Box;
+        this.overlayActionButton = this.findNode(owner, "OverlayActionButton") as Laya.Button;
+        this.overlayReplayButton = this.findNode(owner, "OverlayReplayButton") as Laya.Button;
         if (this.AudioButton) this.AudioButton.visible = false;
 
         // 记录初始坐标，后续按题目居中时会在此基础上偏移
@@ -253,6 +273,9 @@ export class Scene_Game extends Laya.Script {
         if (this.downButton) this.downButton.on(Laya.Event.CLICK, this, this.onDownClick);
         if (this.RankButton) this.RankButton.on(Laya.Event.CLICK, this, this.onRankClick);
         if (this.AudioButton) this.AudioButton.on(Laya.Event.CLICK, this, this.onAudioClick);
+        if (this.backHomeButton) this.backHomeButton.on(Laya.Event.CLICK, this, this.onBackHome);
+        if (this.overlayActionButton) this.overlayActionButton.on(Laya.Event.CLICK, this, this.onOverlayAction);
+        if (this.overlayReplayButton) this.overlayReplayButton.on(Laya.Event.CLICK, this, this.onOverlayReplay);
     }
 
     // ------------------------------------------------------------------
@@ -404,7 +427,12 @@ export class Scene_Game extends Laya.Script {
         if (!this._audioDone || !this._minShown) return;
         this._solvedDone = true;
         Laya.timer.clear(this, this.onAudioDone);
-        this.nextQuestion();
+        this.hideOverlay();
+        if (this.dailyMode && this._queue.length === 0) {
+            this.finishDailyChallenge();
+        } else {
+            this.nextQuestion();
+        }
     }
 
     private initList(list: Laya.List, render: (cell: Laya.Box, index: number) => void,
@@ -450,6 +478,16 @@ export class Scene_Game extends Laya.Script {
      */
     private fillQueue(): void {
         this._queue = [];
+        if (this.dailyMode) {
+            this._levelPlan = { 1: 10 };
+            this._levelDone = { 1: 0 };
+            const seed = this.dateKey();
+            const scores = this._questions.map((_, idx) => ({ idx: idx, sort: this.stableHash(seed + ":" + idx) }));
+            scores.sort((a, b) => a.sort - b.sort || a.idx - b.idx);
+            for (let i = 0; i < Math.min(10, scores.length); i++) this._queue.push({ idx: scores[i].idx, level: 1 });
+            this._levelPlan[1] = this._queue.length;
+            return;
+        }
         this._levelPlan = {};
         this._levelDone = {};
 
@@ -499,6 +537,10 @@ export class Scene_Game extends Laya.Script {
 
         // 队列取空说明所有难度的题都出完了，重新洗牌开新一轮
         const newRound = this._queue.length === 0;
+        if (newRound && this.dailyMode) {
+            this.finishDailyChallenge();
+            return;
+        }
         if (newRound) this.fillQueue();
 
         const item = this._queue.shift();
@@ -510,6 +552,7 @@ export class Scene_Game extends Laya.Script {
         this._curLevel = item.level;
         this._levelDone[item.level] = (this._levelDone[item.level] || 0) + 1;
         // 提示语挂到下一次 showMeaning 上显示（避免被含义信息覆盖）
+        const levelTransition = !this.dailyMode && (newRound || (this._levelDone[item.level] === 1 && item.level > 1));
         if (newRound) {
             this._pendingTip = "全部题目已答完，重新开始新一轮！";
         } else if (this._levelDone[item.level] === 1) {
@@ -545,7 +588,8 @@ export class Scene_Game extends Laya.Script {
         this.stopAudio();
         if (this.AudioButton) this.AudioButton.visible = false;
 
-        if (this.audioAutoPlay) this.playCurAudio(false);
+        if (levelTransition) this.showOverlay("level", "闯到下一档，继续整！", "难度 " + item.level + " · 东北乡音", "", "当前难度计划题数：" + (this._levelPlan[item.level] || 0) + " 题", "点击继续，开始拼字。", "继续拼字");
+        else if (this.audioAutoPlay) this.playCurAudio(false);
     }
 
     /**
@@ -744,41 +788,13 @@ export class Scene_Game extends Laya.Script {
             + (this._cur.tip ? "，" + this._cur.tip : "") + "（-" + this.tipCost + " 分）");
         this.refreshLists();
         this.checkAnswer();
+        if (!this._locked) this.showOverlay("hint", "提示正在生效", "第 " + (slot + 1) + " 个字是「" + need + "」", "已扣 " + this.tipCost + " 分", this._cur.tip || this._cur.meaning, "已填入答案池，还可以继续选择字块。", "继续拼字");
     }
 
     /** 排行榜 */
     private onRankClick(): void {
-        const wx = this.wx;
-        if (!wx || typeof wx.request !== "function") {
-            this.setInfo("排行榜需要在微信小游戏中查看");
-            return;
-        }
-
-        this.setInfo("排行榜加载中...");
-        wx.request({
-            url: this.rankUrl + "?limit=10",
-            method: "GET",
-            success: (res: any) => {
-                const list = res && res.data && res.data.list ? res.data.list : [];
-                if (!list.length) {
-                    this.setInfo("还没有人上榜，快来抢第一~");
-                    return;
-                }
-                const lines: string[] = [];
-                for (let i = 0; i < list.length; i++) {
-                    lines.push((i + 1) + ". " + (list[i].nickName || "玩家") + "   " + (list[i].score || 0) + " 分");
-                }
-                this.setInfo("排行榜 TOP" + list.length + "\n" + lines.join("\n"));
-            },
-            fail: (err: any) => {
-                console.error("[Scene_Game] 排行榜请求失败", err);
-                this.setInfo("排行榜加载失败，请检查服务器");
-            }
-        });
-
-        Laya.timer.once(5000, this, () => {
-            if (this._cur) this.showMeaning();
-        });
+        Laya.Scene.open("Scene/Scene_Rank.ls", true)
+            .catch((err: any) => console.error("[Scene_Game] 打开排行榜失败", err));
     }
 
     // ------------------------------------------------------------------
@@ -795,6 +811,8 @@ export class Scene_Game extends Laya.Script {
             const add = typeof this._cur.score === "number" ? this._cur.score : 100;
             this.updateScore(this._score + add);
             this.setInfo("答对了！「" + text + "」 " + this._cur.meaning + "  +" + add + " 分");
+            this.recordAlbum(text);
+            this.showOverlay("solved", "答对啦，老带劲了！", "「" + text + "」", "+" + add + " 分", this._cur.meaning, this.audioUrlOf(this._cur) ? "东北话配音播放后自动进入下一题" : "稍后自动进入下一题", "下一题");
             // 等配音播完再进下一题（没配音就按固定间隔）
             this.scheduleNext();
         } else {
@@ -858,7 +876,9 @@ export class Scene_Game extends Laya.Script {
         if (!this._cur) return;
         const done = this._levelDone[this._curLevel] || 0;
         const total = this._levelPlan[this._curLevel] || 0;
-        let text = "【难度" + this._curLevel + " " + done + "/" + total + "】含义：" + this._cur.meaning;
+        if (this.levelNumber) this.levelNumber.text = this.dailyMode ? "今日" : ("0" + this._curLevel).slice(-2);
+        if (this.progressNumber) this.progressNumber.text = done + " / " + total;
+        let text = (this.dailyMode ? "【今日挑战 " : "【难度" + this._curLevel + " ") + done + "/" + total + "】含义：" + this._cur.meaning;
         if (this._pendingTip) {
             text = this._pendingTip + "\n" + text;
             this._pendingTip = "";
@@ -869,6 +889,108 @@ export class Scene_Game extends Laya.Script {
     private setInfo(text: string): void {
         if (this.info) this.info.text = text;
         else console.log("[Scene_Game]", text);
+    }
+
+    private onBackHome(): void {
+        this.stopAudio();
+        Laya.Scene.open("Scene/Scene_Title.ls", true).catch((err: any) => console.error("[Scene_Game] 返回首页失败", err));
+    }
+
+    /** Hint, solved and level-transition panels are prefab nodes; scripts change only content and visibility. */
+    private showOverlay(mode: string, title: string, answer: string, score: string, meaning: string, note: string, action: string): void {
+        if (!this.stateOverlay) return;
+        this.overlayMode = mode;
+        const values: { [name: string]: string } = {
+            OverlayTitle: title, OverlayAnswer: answer, OverlayScore: score,
+            OverlayMeaning: meaning, OverlayNote: note
+        };
+        for (const name in values) {
+            const label = this.findNode(this.stateOverlay, name) as Laya.Label;
+            if (label) label.text = values[name];
+        }
+        if (this.overlayActionButton) this.overlayActionButton.label = action;
+        if (this.overlayReplayButton) this.overlayReplayButton.visible = mode === "solved" && !!this.audioUrlOf(this._cur);
+        this.stateOverlay.visible = true;
+        this._locked = true;
+    }
+
+    private hideOverlay(): void {
+        if (this.stateOverlay) this.stateOverlay.visible = false;
+        this.overlayMode = "";
+    }
+
+    private onOverlayAction(): void {
+        if (this.overlayMode === "solved") {
+            Laya.timer.clearAll(this);
+            this.stopAudio();
+            this._audioDone = true;
+            this._minShown = true;
+            this.goNext();
+        } else if (this.overlayMode === "hint" || this.overlayMode === "level") {
+            const wasLevel = this.overlayMode === "level";
+            this.hideOverlay();
+            this._locked = false;
+            if (wasLevel && this.audioAutoPlay) this.playCurAudio(false);
+        }
+    }
+
+    private onOverlayReplay(): void {
+        if (this.overlayMode === "solved") this.playCurAudio(true);
+    }
+
+    private applyPlayerSettings(): void {
+        try {
+            const settings: any = Laya.LocalStorage.getJSON("dongbei_settings");
+            if (!settings) return;
+            this.audioOnSolved = settings.audioOnSolved !== false;
+            this.audioAutoPlay = settings.audioAutoPlay === true;
+            this.audioVolume = typeof settings.volume === "number" ? Math.max(0, Math.min(1, settings.volume)) : 1;
+        } catch (err) { console.warn("[Scene_Game] 设置读取失败", err); }
+    }
+
+    private applyFontSize(): void {
+        try {
+            const settings: any = Laya.LocalStorage.getJSON("dongbei_settings");
+            if (settings && this.info && typeof settings.fontSize === "number") {
+                this.info.fontSize = Math.max(42, Math.min(64, settings.fontSize));
+            }
+        } catch (err) { console.warn("[Scene_Game] 字号读取失败", err); }
+    }
+
+    private recordAlbum(answer: string): void {
+        try {
+            const old = Laya.LocalStorage.getJSON("dongbei_album");
+            const album: string[] = Array.isArray(old) ? old : [];
+            if (album.indexOf(answer) < 0) {
+                album.push(answer);
+                Laya.LocalStorage.setJSON("dongbei_album", album);
+            }
+        } catch (err) { console.warn("[Scene_Game] 图鉴记录失败", err); }
+    }
+
+    private dateKey(): string {
+        const d = new Date();
+        return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
+    }
+
+    private stableHash(s: string): number {
+        let hash = 2166136261;
+        for (let i = 0; i < s.length; i++) hash = Math.imul(hash ^ s.charCodeAt(i), 16777619);
+        return hash >>> 0;
+    }
+
+    private finishDailyChallenge(): void {
+        this._locked = true;
+        const key = "dongbei_daily_" + this.dateKey();
+        try {
+            const best = Number(Laya.LocalStorage.getItem(key) || 0);
+            if (this._score > best) Laya.LocalStorage.setItem(key, String(this._score));
+        } catch (err) { console.warn("[Scene_Game] 今日成绩保存失败", err); }
+        if (this.info) this.info.text = "今日挑战完成！获得 " + this._score + " 分。点击右上角返回首页。";
+        if (this.List_1) this.List_1.array = [];
+        if (this.List_2) this.List_2.array = [];
+        if (this.TipsButton) this.TipsButton.disabled = true;
+        if (this.downButton) this.downButton.disabled = true;
     }
 
     /** 查找子节点（直接子节点 + 一层嵌套） */

@@ -53,6 +53,9 @@ export class Scene_Title extends Laya.Script {
     /** 登录结果，全局访问：Scene_Title.loginInfo */
     public static loginInfo: WXUserInfo = null;
 
+    /** Title menu selects the normal queue or the daily fixed challenge. */
+    public static pendingMode: string = "normal";
+
     /** 是否已登录 */
     public static get isLogin(): boolean {
         return !!Scene_Title.loginInfo;
@@ -91,11 +94,13 @@ export class Scene_Title extends Laya.Script {
 
         // 进入标题场景后自动登录
         this.wxAutoLogin();
+        this.bindMenu();
     }
 
     onDestroy(): void {
         const btn = this.startButton;
         if (btn) btn.off(Laya.Event.CLICK, this, this.onClickStart);
+        this.unbindMenu();
     }
 
     // ------------------------------------------------------------------
@@ -239,6 +244,7 @@ export class Scene_Title extends Laya.Script {
     private onClickStart(): void {
         if (this._enteringGame) return;
         this._enteringGame = true;
+        Scene_Title.pendingMode = "normal";
 
         const btn = this.startButton;
         if (btn) btn.disabled = true;
@@ -252,6 +258,46 @@ export class Scene_Title extends Laya.Script {
                 this._enteringGame = false;
                 if (btn) btn.disabled = false;
             });
+    }
+
+
+    private menuButton(name: string): Laya.Button {
+        return this.owner ? this.owner.getChildByName(name) as Laya.Button : null;
+    }
+
+    private bindMenu(): void {
+        const pairs: { name: string; handler: () => void }[] = [
+            { name: "DailyButton", handler: this.openDaily },
+            { name: "AlbumButton", handler: this.openAlbum },
+            { name: "RankMenuButton", handler: this.openRank },
+            { name: "SettingsButton", handler: this.openSettings }
+        ];
+        for (const pair of pairs) {
+            const button = this.menuButton(pair.name);
+            if (button) button.on(Laya.Event.CLICK, this, pair.handler);
+        }
+    }
+
+    private unbindMenu(): void {
+        const pairs: { name: string; handler: () => void }[] = [
+            { name: "DailyButton", handler: this.openDaily },
+            { name: "AlbumButton", handler: this.openAlbum },
+            { name: "RankMenuButton", handler: this.openRank },
+            { name: "SettingsButton", handler: this.openSettings }
+        ];
+        for (const pair of pairs) {
+            const button = this.menuButton(pair.name);
+            if (button) button.off(Laya.Event.CLICK, this, pair.handler);
+        }
+    }
+
+    private openDaily(): void { this.openMenuScene("Scene/Scene_Daily.ls"); }
+    private openAlbum(): void { this.openMenuScene("Scene/Scene_Album.ls"); }
+    private openRank(): void { this.openMenuScene("Scene/Scene_Rank.ls"); }
+    private openSettings(): void { this.openMenuScene("Scene/Scene_Settings.ls"); }
+
+    private openMenuScene(path: string): void {
+        Laya.Scene.open(path, true).catch((err: any) => console.error("[Scene_Title] 打开菜单失败", path, err));
     }
 
     /** 获取当前登录用户信息（未登录返回 null） */
