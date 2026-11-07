@@ -34,87 +34,113 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.userStore = void 0;
-const fs = __importStar(require("fs"));
-const path = __importStar(require("path"));
+const fs = __importStar(require("node:fs"));
+const path = __importStar(require("node:path"));
+const node_crypto_1 = require("node:crypto");
 const config_1 = require("./config");
-/**
- * 简单的 JSON 文件存储，免数据库，直接跑起来。
- * 正式项目可替换为 MySQL / MongoDB，只需替换本文件实现。
- */
+function isUser(value, openId) {
+    if (!value || typeof value !== "object")
+        return false;
+    const user = value;
+    return user.openId === openId
+        && /^[\w-]{1,128}$/.test(openId)
+        && (user.nickName === undefined || typeof user.nickName === "string")
+        && (user.avatarUrl === undefined || typeof user.avatarUrl === "string")
+        && typeof user.score === "number" && Number.isFinite(user.score) && user.score >= 0
+        && Number.isSafeInteger(user.createTime) && Number.isSafeInteger(user.updateTime);
+}
+/** 单进程存储。保留原有 JSON 格式，写入失败时保留上一份完整存档。 */
 class UserStore {
     constructor(file) {
         this.file = file;
-        this.users = {};
-        this.load();
-    }
-    load() {
+        this.users = Object.create(null);
+        const dir = path.dirname(file);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        fs.accessSync(dir, fs.constants.W_OK);
+        let raw;
         try {
-            if (fs.existsSync(this.file)) {
-                this.users = JSON.parse(fs.readFileSync(this.file, "utf8"));
+            raw = fs.readFileSync(file, "utf8");
+        }
+        catch (error) {
+            if (error.code !== "ENOENT")
+                throw error;
+            this.save(this.users);
+            return;
+        }
+        let data;
+        try {
+            data = JSON.parse(raw.replace(/^\uFEFF/, ""));
+        }
+        catch (_a) {
+            throw new Error("用户存档不是有效的 JSON");
+        }
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+            throw new Error("用户存档格式无效");
+        }
+        for (const [openId, user] of Object.entries(data)) {
+            if (!isUser(user, openId))
+                throw new Error("用户存档包含无效记录");
+            this.users[openId] = user;
+        }
+    }
+    save(users) {
+        const temporary = this.file + "." + (0, node_crypto_1.randomUUID)() + ".tmp";
+        try {
+            const descriptor = fs.openSync(temporary, "wx", 0o600);
+            try {
+                fs.writeFileSync(descriptor, JSON.stringify(users, null, 2), "utf8");
+                fs.fsyncSync(descriptor);
             }
+            finally {
+                fs.closeSync(descriptor);
+            }
+            fs.renameSync(temporary, this.file);
         }
-        catch (e) {
-            console.error("[UserStore] 读取数据失败，使用空数据", e);
-            this.users = {};
+        finally {
+            fs.rmSync(temporary, { force: true });
         }
     }
-    save() {
-        try {
-            fs.mkdirSync(path.dirname(this.file), { recursive: true });
-            fs.writeFileSync(this.file, JSON.stringify(this.users, null, 2), "utf8");
-        }
-        catch (e) {
-            console.error("[UserStore] 保存数据失败", e);
-        }
+    put(user) {
+        const next = Object.assign(Object.create(null), this.users);
+        next[user.openId] = user;
+        this.save(next);
+        this.users = next;
+        return user;
     }
     get(openId) {
-        return this.users[openId] || null;
+        var _a;
+        return (_a = this.users[openId]) !== null && _a !== void 0 ? _a : null;
     }
-    /** 首次登录时创建玩家 */
-    create(openId, nickName, avatarUrl) {
+    login(openId, nickName, avatarUrl) {
+        const current = this.get(openId);
+        if (current) {
+            const name = nickName || current.nickName;
+            const avatar = avatarUrl || current.avatarUrl;
+            if (name === current.nickName && avatar === current.avatarUrl)
+                return current;
+            return this.put({ ...current, nickName: name, avatarUrl: avatar, updateTime: Date.now() });
+        }
         const now = Date.now();
-        const user = {
-            openId: openId,
+        return this.put({
+            openId,
             nickName: nickName || "玩家" + openId.slice(-4),
             avatarUrl: avatarUrl || "",
             score: 0,
             createTime: now,
             updateTime: now,
-        };
-        this.users[openId] = user;
-        this.save();
-        return user;
+        });
     }
-    /** 更新昵称 / 头像（有值时才覆盖） */
-    updateProfile(openId, nickName, avatarUrl) {
-        const user = this.users[openId];
-        if (!user)
-            return null;
-        if (nickName)
-            user.nickName = nickName;
-        if (avatarUrl)
-            user.avatarUrl = avatarUrl;
-        user.updateTime = Date.now();
-        this.save();
-        return user;
-    }
-    /** 上报分数，保留历史最高分 */
     updateScore(openId, score) {
-        const user = this.users[openId];
-        if (!user)
-            return null;
-        if (score > user.score)
-            user.score = score;
-        user.updateTime = Date.now();
-        this.save();
-        return user;
+        const user = this.get(openId);
+        if (!user || score <= user.score)
+            return user;
+        return this.put({ ...user, score, updateTime: Date.now() });
     }
-    /** 排行榜：按最高分倒序 */
-    rank(limit = 20) {
-        return Object.keys(this.users)
-            .map((k) => this.users[k])
-            .sort((a, b) => b.score - a.score)
-            .slice(0, limit);
+    rank(limit) {
+        return Object.values(this.users)
+            .sort((a, b) => b.score - a.score || a.createTime - b.createTime || a.openId.localeCompare(b.openId))
+            .slice(0, limit)
+            .map(({ nickName, avatarUrl, score }) => ({ nickName, avatarUrl, score }));
     }
 }
 exports.userStore = new UserStore(config_1.config.dataFile);

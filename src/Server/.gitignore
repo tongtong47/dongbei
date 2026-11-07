@@ -1,0 +1,6 @@
+# Local credentials and player data
+.env
+.env.*
+!.env.example
+/data/
+/dist/data/

@@ -32,27 +32,33 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var _a, _b, _c, _d, _e, _f;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.config = void 0;
-const path = __importStar(require("path"));
-/**
- * 服务器配置。
- * 优先读取环境变量，方便部署时不用改代码：
- *   set WX_APPID=wx8fec68b66de58908
- *   set WX_APPSECRET=XXXXXXXX
- *   set PORT=3000
- */
+const path = __importStar(require("node:path"));
+const port = Number((_a = process.env.PORT) !== null && _a !== void 0 ? _a : 3000);
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("PORT 必须为 1–65535 的整数");
+}
+const appId = (_c = (_b = process.env.WX_APPID) === null || _b === void 0 ? void 0 : _b.trim()) !== null && _c !== void 0 ? _c : "";
+const appSecret = (_e = (_d = process.env.WX_APPSECRET) === null || _d === void 0 ? void 0 : _d.trim()) !== null && _e !== void 0 ? _e : "";
+const tokenSecret = (_f = process.env.TOKEN_SECRET) !== null && _f !== void 0 ? _f : "";
+if (!/^wx[0-9a-f]{16}$/i.test(appId)) {
+    throw new Error("请配置有效的 WX_APPID");
+}
+if (!/^[0-9a-f]{32}$/i.test(appSecret)) {
+    throw new Error("请配置有效的 WX_APPSECRET");
+}
+if (Buffer.byteLength(tokenSecret.trim()) < 32) {
+    throw new Error("请配置至少 32 字节的随机 TOKEN_SECRET");
+}
 exports.config = {
-    /** HTTP 监听端口 */
-    port: Number(process.env.PORT || 3000),
-    /** 微信小程序 appId（微信公众平台 -> 开发管理 -> 开发设置） */
-    appId: process.env.WX_APPID || "wx8fec68b66de58908",
-    /** 微信小程序 appSecret（也可不写死，用环境变量 WX_APPSECRET 注入） */
-    appSecret: process.env.WX_APPSECRET || "0f9c1387befc890374b158465967776d",
-    /** 登录令牌签名密钥，线上请改成自己的随机字符串 */
-    tokenSecret: process.env.TOKEN_SECRET || "dongbei_laya_secret",
-    /** 登录令牌有效期（毫秒），默认 7 天 */
+    host: process.env.HOST || "127.0.0.1",
+    port,
+    appId,
+    appSecret,
+    tokenSecret,
     tokenExpire: 7 * 24 * 60 * 60 * 1000,
-    /** 用户数据文件（JSON 文件存储，无需数据库） */
     dataFile: process.env.DATA_FILE || path.join(__dirname, "data", "users.json"),
+    corsOrigins: new Set((process.env.CORS_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean)),
 };

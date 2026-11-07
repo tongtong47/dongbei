@@ -1,43 +1,47 @@
-import * as https from "https";
 import { config } from "./config";
 
-/** 微信 code2Session 接口返回结果 */
-export interface WXSession {
-    openid?: string;
-    session_key?: string;
-    unionid?: string;
-    errcode?: number;
-    errmsg?: string;
+export class WeChatError extends Error {
+    constructor(public readonly status: number, message: string, public readonly errcode?: number) {
+        super(message);
+    }
 }
 
-/**
- * 用小程序端 wx.login 得到的 code 换取 openid / session_key
- * 文档：https://developers.weixin.qq.com/miniprogram/dev/OpenApiDoc/user-login/code2Session.html
- */
-export function code2Session(code: string): Promise<WXSession> {
-    const url = "https://api.weixin.qq.com/sns/jscode2session"
-        + "?appid=" + encodeURIComponent(config.appId)
-        + "&secret=" + encodeURIComponent(config.appSecret)
-        + "&js_code=" + encodeURIComponent(code)
-        + "&grant_type=authorization_code";
-
-    return new Promise<WXSession>((resolve, reject) => {
-        const req = https.get(url, (res) => {
-            let body = "";
-            res.setEncoding("utf8");
-            res.on("data", (chunk: string) => body += chunk);
-            res.on("end", () => {
-                try {
-                    resolve(JSON.parse(body) as WXSession);
-                } catch (e) {
-                    reject(new Error("微信返回数据解析失败：" + body));
-                }
-            });
-        });
-
-        req.on("error", reject);
-        req.setTimeout(10000, () => {
-            req.destroy(new Error("请求微信接口超时"));
-        });
+export async function code2Session(code: string): Promise<string> {
+    const query = new URLSearchParams({
+        appid: config.appId,
+        secret: config.appSecret,
+        js_code: code,
+        grant_type: "authorization_code",
     });
+
+    let session: { openid?: unknown; errcode?: unknown } | null;
+    try {
+        const response = await fetch("https://api.weixin.qq.com/sns/jscode2session?" + query, {
+            signal: AbortSignal.timeout(8000),
+            redirect: "error",
+        });
+        if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error("微信返回非成功状态");
+        }
+        session = await response.json() as typeof session;
+    } catch (error) {
+        if (error instanceof Error && error.name === "TimeoutError") {
+            throw new WeChatError(504, "微信登录响应超时");
+        }
+        throw new WeChatError(502, "微信登录服务暂不可用");
+    }
+
+    const errcode = session?.errcode;
+    if ((errcode === undefined || errcode === 0)
+        && typeof session?.openid === "string" && /^[\w-]{1,128}$/.test(session.openid)) {
+        return session.openid;
+    }
+    if (errcode === 40029 || errcode === 40163) {
+        throw new WeChatError(401, "微信登录凭证无效或已使用", errcode);
+    }
+    if (errcode === 45011 || errcode === 40226) {
+        throw new WeChatError(429, "微信登录受限，请稍后重试", errcode);
+    }
+    throw new WeChatError(502, "微信登录服务暂不可用", typeof errcode === "number" ? errcode : undefined);
 }

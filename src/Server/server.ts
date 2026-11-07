@@ -1,169 +1,189 @@
-import * as http from "http";
-import { URL } from "url";
+import * as http from "node:http";
 import { config } from "./config";
-import { code2Session } from "./wxApi";
+import { code2Session, WeChatError } from "./wxApi";
 import { createToken, parseToken } from "./auth";
 import { userStore } from "./userStore";
 
-/** 写 JSON 响应 */
-function json(res: http.ServerResponse, status: number, data: any): void {
+const maxBodyBytes = 8192;
+const maxConcurrentLogins = 16;
+let pendingLogins = 0;
+
+class RequestError extends Error {
+    constructor(public readonly status: number, message: string) {
+        super(message);
+    }
+}
+
+function json(res: http.ServerResponse, status: number, data: object): void {
     const body = JSON.stringify(data);
     res.writeHead(status, {
         "Content-Type": "application/json; charset=utf-8",
         "Content-Length": Buffer.byteLength(body),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
     });
     res.end(body);
 }
 
-/** 允许跨域（本地浏览器调试用，小游戏线上不受影响） */
-function writeCors(res: http.ServerResponse): void {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-}
-
-/** 读取请求体并解析为 JSON */
-function readBody(req: http.IncomingMessage): Promise<any> {
+function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
-        let raw = "";
-        req.on("data", (chunk) => {
-            raw += chunk;
-            // 简单防超大包
-            if (raw.length > 1024 * 1024) {
-                reject(new Error("请求体过大"));
-                req.destroy();
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        req.on("error", reject);
+        req.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > maxBodyBytes) {
+                chunks.length = 0;
+                reject(new RequestError(413, "请求体过大"));
+                return;
             }
+            chunks.push(chunk);
         });
         req.on("end", () => {
-            if (!raw) return resolve({});
+            if (bytes > maxBodyBytes) return;
             try {
-                resolve(JSON.parse(raw));
-            } catch (e) {
-                resolve({});
+                const data: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+                if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error();
+                resolve(data as Record<string, unknown>);
+            } catch {
+                reject(new RequestError(400, "请求体必须是 JSON 对象"));
             }
         });
-        req.on("error", reject);
     });
 }
 
-/** 从 body / query / Authorization 头中取 token */
-function getToken(req: http.IncomingMessage, body: any, query: URLSearchParams): string {
-    if (body && body.token) return body.token;
-    if (query.get("token")) return query.get("token") as string;
-    const auth = req.headers["authorization"];
-    if (auth && typeof auth === "string") {
-        return auth.replace(/^Bearer\s+/i, "").trim();
+function getToken(req: http.IncomingMessage, query: URLSearchParams, body?: Record<string, unknown>): string {
+    if (req.headers.authorization) {
+        return /^Bearer\s+(\S+)$/i.exec(req.headers.authorization)?.[1] ?? "";
     }
-    return "";
+    if (body?.token !== undefined) return typeof body.token === "string" ? body.token : "";
+    return query.get("token") ?? "";
 }
 
-const server = http.createServer(async (req, res) => {
-    writeCors(res);
-
-    if (req.method === "OPTIONS") {
-        res.writeHead(204);
-        res.end();
-        return;
+function optionalString(value: unknown, maxLength: number, field: string): string | undefined {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || value.length > maxLength) {
+        throw new RequestError(400, field + " 格式不正确");
     }
+    return value.trim() || undefined;
+}
 
-    const url = new URL(req.url || "/", "http://localhost");
-    const pathname = url.pathname;
-    const query = url.searchParams;
+function validAvatar(value: string | undefined): boolean {
+    if (!value) return true;
+    const url = URL.parse(value);
+    return url?.protocol === "https:" && !url.username && !url.password;
+}
+
+const methods = new Map([
+    ["/api/wxlogin", "POST"],
+    ["/api/user", "GET"],
+    ["/api/score", "POST"],
+    ["/api/rank", "GET"],
+    ["/api/health", "GET"],
+]);
+
+const server = http.createServer({
+    maxHeaderSize: 8192,
+    headersTimeout: 10000,
+    requestTimeout: 15000,
+    connectionsCheckingInterval: 1000,
+}, async (req, res) => {
+    res.setHeader("Vary", "Origin");
+    const origin = req.headers.origin;
+    if (origin && config.corsOrigins.has(origin)) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+        res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    }
 
     try {
-        // 微信自动登录：POST { code, nickName?, avatarUrl? }
-        if (pathname === "/api/wxlogin" && req.method === "POST") {
-            const body = await readBody(req);
-            const code = body && body.code;
-            if (!code) {
-                return json(res, 400, { error: "缺少 code" });
+        const url = URL.parse(req.url || "/", "http://localhost");
+        if (!url) throw new RequestError(400, "请求地址无效");
+        const { pathname, searchParams } = url;
+        const method = methods.get(pathname);
+        if (!method) throw new RequestError(404, "接口不存在");
+        if (req.method === "OPTIONS") {
+            res.writeHead(204).end();
+            return;
+        }
+        if (req.method !== method) {
+            res.setHeader("Allow", method + ", OPTIONS");
+            throw new RequestError(405, "请求方法不支持");
+        }
+        if (method === "POST" && Number(req.headers["content-length"]) > maxBodyBytes) {
+            throw new RequestError(413, "请求体过大");
+        }
+
+        switch (pathname) {
+            case "/api/wxlogin": {
+                const body = await readBody(req);
+                const code = optionalString(body.code, 256, "code");
+                if (!code) throw new RequestError(400, "缺少 code");
+                const nickName = optionalString(body.nickName, 64, "nickName");
+                const avatarUrl = optionalString(body.avatarUrl, 2048, "avatarUrl");
+                if (!validAvatar(avatarUrl)) throw new RequestError(400, "avatarUrl 必须为 HTTPS 地址");
+
+                if (pendingLogins >= maxConcurrentLogins) throw new RequestError(503, "登录繁忙，请稍后重试");
+                pendingLogins++;
+                try {
+                    const openId = await code2Session(code);
+                    const user = userStore.login(openId, nickName, avatarUrl);
+                    return json(res, 200, { openId, token: createToken(openId), user });
+                } finally {
+                    pendingLogins--;
+                }
             }
+            case "/api/user":
+            case "/api/score": {
+                const body = method === "POST" ? await readBody(req) : undefined;
+                const openId = parseToken(getToken(req, searchParams, body));
+                if (!openId) throw new RequestError(401, "token 无效或已过期");
 
-            const session = await code2Session(code);
-            if (!session.openid) {
-                console.error("[wxlogin] 微信登录失败", session);
-                return json(res, 401, {
-                    error: session.errmsg || "微信登录失败",
-                    errcode: session.errcode,
-                });
+                let user = userStore.get(openId);
+                if (body) {
+                    const score = body.score;
+                    if (typeof score !== "number" || !Number.isSafeInteger(score) || score < 0) {
+                        throw new RequestError(400, "score 必须是非负安全整数");
+                    }
+                    user = userStore.updateScore(openId, score);
+                }
+                if (!user) throw new RequestError(404, "玩家不存在");
+                return json(res, 200, { user });
             }
-
-            const openId = session.openid;
-            let user = userStore.get(openId);
-            if (!user) {
-                user = userStore.create(openId, body.nickName, body.avatarUrl);
-            } else {
-                user = userStore.updateProfile(openId, body.nickName, body.avatarUrl) || user;
+            case "/api/rank": {
+                const raw = searchParams.get("limit") ?? "20";
+                if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+                    throw new RequestError(400, "limit 必须为正整数");
+                }
+                return json(res, 200, { list: userStore.rank(Math.min(100, Number(raw))) });
             }
-
-            const token = createToken(openId);
-            console.log("[wxlogin] 登录成功 openId =", openId);
-
-            return json(res, 200, {
-                openId: openId,
-                token: token,
-                user: user,
-            });
+            case "/api/health":
+                return json(res, 200, { ok: true, time: Date.now() });
         }
-
-        // 查询玩家信息：GET /api/user?token=xxx
-        if (pathname === "/api/user" && req.method === "GET") {
-            const openId = parseToken(getToken(req, null, query));
-            if (!openId) return json(res, 401, { error: "token 无效或已过期" });
-
-            const user = userStore.get(openId);
-            if (!user) return json(res, 404, { error: "玩家不存在" });
-
-            return json(res, 200, { user: user });
+    } catch (error) {
+        if (error instanceof WeChatError) {
+            if (error.status >= 500) console.error("[wxlogin]", error.status, error.errcode ?? "");
+            return json(res, error.status, { error: error.message, errcode: error.errcode });
         }
-
-        // 上报分数：POST { token, score }
-        if (pathname === "/api/score" && req.method === "POST") {
-            const body = await readBody(req);
-            const openId = parseToken(getToken(req, body, query));
-            if (!openId) return json(res, 401, { error: "token 无效或已过期" });
-
-            const score = Number(body && body.score);
-            if (isNaN(score)) return json(res, 400, { error: "score 必须是数字" });
-
-            const user = userStore.updateScore(openId, score);
-            if (!user) return json(res, 404, { error: "玩家不存在" });
-
-            return json(res, 200, { user: user });
+        if (error instanceof RequestError) {
+            if (error.status === 413) res.setHeader("Connection", "close");
+            return json(res, error.status, { error: error.message });
         }
-
-        // 排行榜：GET /api/rank?limit=20
-        if (pathname === "/api/rank" && req.method === "GET") {
-            const limit = Number(query.get("limit")) || 20;
-            return json(res, 200, { list: userStore.rank(limit) });
-        }
-
-        // 健康检查
-        if (pathname === "/api/health") {
-            return json(res, 200, { ok: true, time: Date.now() });
-        }
-
-        return json(res, 404, { error: "接口不存在：" + pathname });
-    } catch (e: any) {
-        console.error("[server] 处理请求异常", e);
-        return json(res, 500, { error: e && e.message ? e.message : "服务器内部错误" });
+        console.error("[server] 请求处理失败", error);
+        if (!res.destroyed) return json(res, 500, { error: "服务器内部错误" });
     }
 });
 
-server.listen(config.port, () => {
-    console.log("------------------------------------------");
-    console.log("东北话小游戏服务器已启动: http://localhost:" + config.port);
-    console.log("接口:");
-    console.log("  POST /api/wxlogin  { code }          微信自动登录");
-    console.log("  GET  /api/user     ?token=           查询玩家");
-    console.log("  POST /api/score    { token, score }  上报分数");
-    console.log("  GET  /api/rank     ?limit=20         排行榜");
-    console.log("  小程序 appId: " + config.appId);
-    console.log("------------------------------------------");
-    if (config.appId.indexOf("请填写") === 0 || !/^wx/.test(config.appId)) {
-        console.warn("警告：WX_APPID 未配置或格式不对（应以 wx 开头），微信登录会失败！");
-    }
-    if (config.appSecret.indexOf("请填写") === 0) {
-        console.warn("警告：WX_APPSECRET 未配置，微信登录会失败！");
-    }
+server.listen(config.port, config.host, () => {
+    console.log("[server] 东北话小游戏后端已启动", server.address());
 });
+
+function shutdown(): void {
+    server.close((error) => {
+        if (error) process.exitCode = 1;
+    });
+    setTimeout(() => server.closeAllConnections(), 15000).unref();
+}
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);

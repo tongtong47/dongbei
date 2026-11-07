@@ -35,8 +35,6 @@
         "_$ref": "asn2xu2t"
       },
       "questionUrl": "resources/Gameinfo/dic_dongbei.json",
-      "rankUrl": "http://localhost:3000/api/rank",
-      "scoreUrl": "http://localhost:3000/api/score",
       "questionsPerLevel": 50,
       "distractorMin": 2,
       "distractorMax": 3,

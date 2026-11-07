@@ -14,7 +14,6 @@
       "_$type": "44f6ca62-0667-58cf-b588-bd5acd63349d",
       "scriptPath": "../src/Client/Scene_Extra.ts",
       "mode": "rank",
-      "rankUrl": "http://localhost:3000/api/rank",
       "questionUrl": "resources/Gameinfo/dic_dongbei.json",
       "audioDir": "resources/Dubbing/"
     }

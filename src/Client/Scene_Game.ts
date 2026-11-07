@@ -131,11 +131,11 @@ export class Scene_Game extends Laya.Script {
 
     /** 服务器排行榜地址 */
     @property({ type: "string" })
-    public rankUrl: string = "http://localhost:3000/api/rank";
+    public rankUrl: string = Scene_Title.apiBaseUrl + "/api/rank";
 
     /** 服务器分数上报地址 */
     @property({ type: "string" })
-    public scoreUrl: string = "http://localhost:3000/api/score";
+    public scoreUrl: string = Scene_Title.apiBaseUrl + "/api/score";
 
     /** 每个难度出多少题（该难度题目不足时出完为止，取过的题不再重复） */
     @property({ type: "number", tips: "每个难度从题库随机抽取的题目数，0 或负数表示不限制（出完该难度全部）" })
@@ -855,7 +855,9 @@ export class Scene_Game extends Laya.Script {
             data: { token: token, score: this._score },
             header: { "content-type": "application/json" },
             success: (res: any) => {
-                console.log("[Scene_Game] 分数已上报：", this._score);
+                if (!res || res.statusCode !== 200) {
+                    console.warn("[Scene_Game] 分数上报失败，状态码", res && res.statusCode);
+                }
             },
             fail: (err: any) => {
                 console.warn("[Scene_Game] 分数上报失败", err);

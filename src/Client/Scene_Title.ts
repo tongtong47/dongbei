@@ -14,8 +14,6 @@ interface WXUserInfo {
     nickName?: string;
     /** 头像地址 */
     avatarUrl?: string;
-    /** 微信登录凭证 */
-    code?: string;
     [key: string]: any;
 }
 
@@ -30,6 +28,8 @@ export class Scene_Title extends Laya.Script {
 
     declare owner: Laya.Scene;
 
+    public static readonly apiBaseUrl = "http://localhost:3000";
+
     /** 场景中的“开始游戏”按钮（Start_Button） */
     @property({ type: Laya.Button, tips: "场景中的 Start_Button 节点" })
     public Start_Button: Laya.Button = null;
@@ -40,15 +40,13 @@ export class Scene_Title extends Laya.Script {
 
     /**
      * 开发者服务器登录接口，用于把 wx.login 的 code 换成 openId / token。
-     * 留空时只做本地静默登录：仅获取并缓存 code，不请求服务器。
+     * 留空时跳过服务器登录。
      */
-    @property({ type: "string", tips: "开发者服务器登录接口，例如 http://localhost:3000/api/wxlogin；留空则仅静默登录，不请求服务器" })
-    public loginUrl: string = "http://localhost:3000/api/wxlogin";
+    @property({ type: "string", tips: "开发者服务器登录接口，留空时跳过服务器登录" })
+    public loginUrl: string = Scene_Title.apiBaseUrl + "/api/wxlogin";
 
     /** 本地缓存 key：用户信息 */
     private static readonly KEY_USER_INFO: string = "wx_user_info";
-    /** 本地缓存 key：登录凭证 */
-    private static readonly KEY_LOGIN_CODE: string = "wx_login_code";
 
     /** 登录结果，全局访问：Scene_Title.loginInfo */
     public static loginInfo: WXUserInfo = null;
@@ -122,7 +120,6 @@ export class Scene_Title extends Laya.Script {
         const cached = this.getCachedUserInfo();
         if (cached) {
             Scene_Title.loginInfo = cached;
-            console.log("[Scene_Title] 使用本地缓存的登录信息", cached);
         }
 
         this.setButtonState("登录中...", true);
@@ -135,7 +132,6 @@ export class Scene_Title extends Laya.Script {
                     this.onLoginFinished(cached);
                     return;
                 }
-                console.log("[Scene_Title] wx.login 成功 code =", code);
                 this.loginByCode(code, cached);
             },
             fail: (err: any) => {
@@ -147,17 +143,10 @@ export class Scene_Title extends Laya.Script {
 
     /**
      * 用 code 向开发者服务器换取登录态。
-     * 未配置 loginUrl 时，只把 code 缓存到本地。
      */
     private loginByCode(code: string, fallback: WXUserInfo): void {
-        // 保存凭证，便于服务器接入后补换取 openId
-        this.setStorageItem(Scene_Title.KEY_LOGIN_CODE, code);
-
         if (!this.loginUrl) {
-            const info: WXUserInfo = fallback || {};
-            info.code = code;
-            this.saveUserInfo(info);
-            this.onLoginFinished(info);
+            this.onLoginFinished(fallback);
             return;
         }
 
@@ -173,12 +162,11 @@ export class Scene_Title extends Laya.Script {
             header: { "content-type": "application/json" },
             success: (res: any) => {
                 const data = res ? res.data : null;
-                if (data && (data.openId || data.token)) {
-                    data.code = code;
+                if (res && res.statusCode === 200 && data && data.openId && data.token) {
                     this.saveUserInfo(data);
                     this.onLoginFinished(data);
                 } else {
-                    console.error("[Scene_Title] 登录接口返回数据异常", data);
+                    console.error("[Scene_Title] 登录接口请求失败，状态码", res && res.statusCode);
                     this.onLoginFinished(fallback);
                 }
             },
@@ -195,7 +183,7 @@ export class Scene_Title extends Laya.Script {
         this.setButtonState(this._defaultLabel, false);
 
         if (info) {
-            console.log("[Scene_Title] 微信登录完成", info);
+            console.log("[Scene_Title] 微信登录完成");
             // 其它模块可监听该事件：Laya.stage.on("WX_LOGIN_SUCCESS", this, cb)
             Laya.stage.event("WX_LOGIN_SUCCESS", info);
         } else {
@@ -218,14 +206,6 @@ export class Scene_Title extends Laya.Script {
             return info ? (info as WXUserInfo) : null;
         } catch (e) {
             return null;
-        }
-    }
-
-    private setStorageItem(key: string, value: string): void {
-        try {
-            Laya.LocalStorage.setItem(key, value);
-        } catch (e) {
-            console.warn("[Scene_Title] 本地存储写入失败", e);
         }
     }
 

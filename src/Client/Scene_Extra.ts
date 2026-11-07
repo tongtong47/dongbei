@@ -15,7 +15,7 @@ export class Scene_Extra extends Laya.Script {
     declare owner: Laya.Scene;
 
     @property({ type: "string" }) public mode: string = "rank";
-    @property({ type: "string" }) public rankUrl: string = "http://localhost:3000/api/rank";
+    @property({ type: "string" }) public rankUrl: string = Scene_Title.apiBaseUrl + "/api/rank";
     @property({ type: "string" }) public questionUrl: string = "resources/Gameinfo/dic_dongbei.json";
     @property({ type: "string" }) public audioDir: string = "resources/Dubbing/";
 
@@ -81,9 +81,20 @@ export class Scene_Extra extends Laya.Script {
         const w: any = Laya.Browser.window;
         const url = this.rankUrl + "?limit=10";
         if (w && w.wx && typeof w.wx.request === "function") {
-            w.wx.request({ url: url, method: "GET", success: (res: any) => done(res && res.data ? res.data.list : []), fail: fail });
+            w.wx.request({
+                url: url,
+                method: "GET",
+                success: (res: any) => {
+                    if (res && res.statusCode === 200 && Array.isArray(res.data?.list)) done(res.data.list);
+                    else fail();
+                },
+                fail: fail
+            });
         } else if (w && typeof w.fetch === "function") {
-            w.fetch(url).then((r: any) => r.json()).then((data: any) => done(data.list)).catch(fail);
+            w.fetch(url).then((res: any) => {
+                if (!res.ok) throw new Error("排行榜请求失败");
+                return res.json();
+            }).then((data: any) => Array.isArray(data?.list) ? done(data.list) : fail()).catch(fail);
         } else fail();
     }
 
